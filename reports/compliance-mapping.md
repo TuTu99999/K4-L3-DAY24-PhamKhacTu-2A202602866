@@ -1,10 +1,10 @@
-# Compliance mapping — điền trong checkpoint 5
+# Compliance mapping — checkpoint 5
 
-| Nguồn / yêu cầu | Control đã làm | Evidence file:dòng | Giới hạn |
+| Nguồn / chủ đề | Control đã làm | Bằng chứng file:dòng | Giới hạn |
 |---|---|---|---|
-| Luật 91/2025/QH15 | | | |
-| NĐ 356/2025/NĐ-CP | | | |
-| Luật AI 134/2025/QH15 | | | |
-| OWASP ASI01, ASI03, ASI04 | | | |
+| [Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15](https://vanban.chinhphu.vn/?classid=1&docid=214590&pageid=27160&typegroup=) | Nhận diện và che bốn loại PII; dữ liệu `restricted` không được đi qua tool có egress; quyền đọc được giới hạn theo principal và mục đích. | `agent/pii.py:48`, `agent/pii.py:80`, `agent/policy.py:67`, `agent/policy.py:77-103` | Mình đã đối chiếu tên, số hiệu, ngày hiệu lực trên Cổng TTĐT Chính phủ nhưng chưa đối chiếu từng điều khoản, nên không gán control này cho một điều cụ thể. Dữ liệu ở đây hoàn toàn tổng hợp và kết quả lab không phải chứng nhận tuân thủ. |
+| [Nghị định 356/2025/NĐ-CP](https://vanban.chinhphu.vn/?classid=1&docid=216387&pageid=27160) | Mọi tool call có allow/deny và reason; ledger chỉ giữ hash tham số, danh tính thay mặt và chuỗi hash để phục vụ đối chiếu. | `agent/runner.py:90-113`, `agent/ledger.py:53`, `agent/ledger.py:76` | Chưa xác minh điều khoản cụ thể của nghị định. Ledger lab không phải kho audit bất biến và không thay thế quy trình quản trị dữ liệu, lưu giữ hay ứng phó sự cố trong hệ thống thật. |
+| [Luật Trí tuệ nhân tạo 134/2025/QH15](https://vanban.chinhphu.vn/?classid=1&docid=216334&orggroupid=1&pageid=27160) | Có ranh giới Run A/Run B, quyết định policy tại tool boundary, OBO theo scope/purpose/TTL và log giải thích được cho từng hành động. | `agent/runner.py:90`, `agent/runner.py:117-132`, `agent/policy.py:77-107`, `agent/runner.py:176-222` | Đã xác minh văn bản có hiệu lực từ 01/03/2026 nhưng chưa đối chiếu điều khoản cụ thể. `--as` chỉ chọn fixture quyền, không phải xác thực danh tính hay cơ chế giám sát AI production. |
+| [OWASP Agentic Top 10 — ASI01, ASI03, ASI04](https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/) | ASI01: không truyền free text attacker sang Run B, chỉ dùng ticket ID từ tên file. ASI03: principal, scope cha, purpose và TTL được kiểm trước tool. ASI04: dependency có hash, hook Gitleaks pin phiên bản và quét secret. | `agent/runner.py:117-132`, `agent/runner.py:176-200`, `agent/policy.py:77-103`, `.pre-commit-config.yaml:1-6`, `.gitleaks.toml:12-14`, `requirements.lock:1` | Mapping này là cách áp dụng kỹ thuật cho lab, không chứng minh đã bao phủ toàn bộ threat model OWASP hoặc rủi ro supply-chain của model, dữ liệu, MCP và hạ tầng triển khai. |
 
-Chỉ ghi điều khoản cụ thể khi đã đối chiếu văn bản gốc. Mô phỏng kỹ thuật không tự chứng minh tuân thủ pháp luật.
+Các nguồn pháp luật phía trên là trang văn bản chính thức của Chính phủ. Bảng chỉ liên hệ control kỹ thuật với chủ đề quản trị; không đưa ra kết luận pháp lý hay tuyên bố hệ thống đã tuân thủ.
