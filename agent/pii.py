@@ -30,10 +30,57 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b")
+_BANK_RE = re.compile(
+    r"(?i)(?:\bSTK\b|số\s+tài\s+khoản)(?:\s+(?:liên\s+quan|là))?\s*[:#-]?\s*(\d{8,16})\b"
+)
+_PHONE_RE = re.compile(r"(?<!\d)0(?:[ -]?\d){9,10}(?!\d)")
+_CCCD_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+
+
+def _overlaps(left: dict, right: dict) -> bool:
+    return left["start"] < right["end"] and right["start"] < left["end"]
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    """Tìm các giá trị PII và trả offset trên chính chuỗi đầu vào."""
+    candidates: list[tuple[int, dict]] = []
+
+    for match in _EMAIL_RE.finditer(text):
+        candidates.append((0, {"type": "EMAIL", "start": match.start(), "end": match.end()}))
+
+    # Tài khoản ngân hàng được nhận diện theo nhãn để tránh coi mọi dãy số
+    # nghiệp vụ dài 8-16 ký tự là PII loại này.
+    for match in _BANK_RE.finditer(text):
+        candidates.append(
+            (0, {"type": "VN_BANK_ACCOUNT", "start": match.start(1), "end": match.end(1)})
+        )
+
+    for match in _PHONE_RE.finditer(text):
+        candidates.append(
+            (1, {"type": "VN_PHONE", "start": match.start(), "end": match.end()})
+        )
+
+    for match in _CCCD_RE.finditer(text):
+        candidates.append(
+            (2, {"type": "VN_CCCD", "start": match.start(), "end": match.end()})
+        )
+
+    # Ưu tiên match có ngữ cảnh rõ (email/STK), sau đó loại vùng trùng.
+    entities: list[dict] = []
+    for _, candidate in sorted(candidates, key=lambda item: (item[0], item[1]["start"])):
+        if not any(_overlaps(candidate, accepted) for accepted in entities):
+            entities.append(candidate)
+    return sorted(entities, key=lambda entity: (entity["start"], entity["end"]))
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    """Che PII từ phải sang trái để các offset còn lại không bị thay đổi."""
+    redacted = text
+    for entity in reversed(detect(text)):
+        replacement = f"[REDACTED_{entity['type']}]"
+        redacted = redacted[: entity["start"]] + replacement + redacted[entity["end"] :]
+    return redacted
