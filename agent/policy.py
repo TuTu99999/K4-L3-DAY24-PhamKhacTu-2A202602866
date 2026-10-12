@@ -34,7 +34,14 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+_PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+_CLASSIFICATIONS = {"public", "internal", "restricted"}
 
 
 @dataclass(frozen=True)
@@ -52,4 +59,50 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    if context.data_classification not in _CLASSIFICATIONS:
+        return False, f"unknown data classification: {context.data_classification!r}"
+
+    # Đây là rào chắn dữ liệu, áp dụng trước quyền theo vai trò: có quyền đọc
+    # không đồng nghĩa với quyền gửi dữ liệu restricted ra network.
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "restricted data cannot be used in an egress-enabled tool call"
+
+    try:
+        principals = json.loads(_PRINCIPALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"principal store unavailable: {type(exc).__name__}"
+
+    principal = principals.get(context.principal_id)
+    if principal is None:
+        return False, f"unknown principal: {context.principal_id or '<empty>'}"
+
+    if context.request_purpose not in principal.get("purposes", []):
+        return False, f"purpose {context.request_purpose!r} is not allowed for {context.principal_id}"
+
+    if not context.requested_tool:
+        return False, "requested tool is missing"
+    if context.requested_tool not in principal.get("allowed_tools", []):
+        return False, f"principal {context.principal_id} cannot use {context.requested_tool}"
+    if context.requested_tool not in context.agent_scopes:
+        return False, f"tool {context.requested_tool} is outside agent scopes"
+
+    if context.delegation_depth < 0:
+        return False, "delegation depth cannot be negative"
+    if context.delegation_depth > 0 and context.requested_tool not in context.parent_scopes:
+        return False, f"tool {context.requested_tool} is outside parent scopes"
+
+    if not context.expires_at:
+        return False, "authorization expiry is missing"
+    try:
+        expires_at = datetime.fromisoformat(context.expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False, "authorization expiry is not valid ISO-8601"
+    if expires_at.tzinfo is None:
+        return False, "authorization expiry must include a timezone"
+    if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return False, "authorization has expired"
+
+    return True, (
+        f"principal {context.principal_id} may use {context.requested_tool} "
+        f"for {context.request_purpose}"
+    )
