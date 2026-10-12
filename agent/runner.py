@@ -59,7 +59,15 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, pii, tools
+from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
@@ -69,6 +77,148 @@ class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+_CUSTOMERS_FILE = Path(__file__).resolve().parent.parent / "data" / "customers.json"
+_TICKET_NAME_RE = re.compile(r"^ticket-(\d+)(?:[a-z])?\.md$", re.IGNORECASE)
+_SAFE_EGRESS_URL = "http://127.0.0.1:10024/reconcile"
+
+
+def _args_hash(arguments: dict) -> str:
+    encoded = json.dumps(arguments, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decide_and_log(
+    *,
+    context: PolicyContext,
+    path: Path,
+    run_id: str,
+    agent_id: str,
+    arguments: dict,
+) -> bool:
+    allowed, reason = check(context)
+    ledger.append(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_id": agent_id,
+            "run_id": run_id,
+            "tool": context.requested_tool,
+            "args_hash": _args_hash(arguments),
+            "classification": context.data_classification,
+            "decision": "allow" if allowed else "deny",
+            "reason": reason,
+            "on_behalf_of": context.principal_id,
+            "expires_at": context.expires_at,
+        },
+        path,
+    )
+    return allowed
+
+
+def _ticket_ids(docs: list[dict]) -> set[int]:
+    ticket_ids: set[int] = set()
+    for doc in docs:
+        match = _TICKET_NAME_RE.fullmatch(str(doc.get("id", "")))
+        if match:
+            ticket_ids.add(int(match.group(1)))
+    return ticket_ids
+
+
+def _customers_for_tickets(ticket_ids: set[int]) -> list[str]:
+    customers = json.loads(_CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    return sorted(
+        customer["customer_id"]
+        for customer in customers
+        if ticket_ids.intersection(customer.get("related_tickets", []))
+    )
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    log_path = Path(log_dir) / "ledger.jsonl" if log_dir else DEFAULT_LEDGER_PATH
+    request_id = uuid.uuid4().hex
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+
+    run_a_id = f"{request_id}:run-a"
+    run_a_context = PolicyContext(
+        data_classification="internal",
+        request_purpose="summarize-tickets",
+        agent_owner="lab24-agent/run-a",
+        delegation_depth=0,
+        egress_enabled=False,
+        principal_id=principal_id,
+        requested_tool="search_docs",
+        agent_scopes=("search_docs",),
+        parent_scopes=(),
+        expires_at=expires_at,
+    )
+    if not _decide_and_log(
+        context=run_a_context,
+        path=log_path,
+        run_id=run_a_id,
+        agent_id="lab24-agent/run-a",
+        arguments={"query": message},
+    ):
+        return llm.summarize([])
+
+    docs = tools.search_docs(message)
+    combined_text = "\n\n".join(doc["text"] for doc in docs)
+    injection_seen = llm.find_injection(combined_text) is not None
+
+    # Việc phát hiện lure nằm trọn trong run A. Nội dung dùng cho câu trả lời
+    # được tạo thành bản sao đã che PII; text thô không đi qua boundary.
+    safe_docs = [
+        {"id": doc["id"], "text": pii.redact(doc["text"])}
+        for doc in docs
+    ]
+
+    # Boundary A -> B chỉ mang số ticket lấy từ tên file. Customer ID và URL
+    # nằm trong nội dung tự do không được truyền sang run B.
+    ticket_ids = _ticket_ids(docs)
+    customer_ids = _customers_for_tickets(ticket_ids)
+    records: list[dict] = []
+    run_b_id = f"{request_id}:run-b"
+    for customer_id in customer_ids:
+        read_context = PolicyContext(
+            data_classification="restricted",
+            request_purpose="support-reply",
+            agent_owner="lab24-agent/run-b",
+            delegation_depth=0,
+            egress_enabled=False,
+            principal_id=principal_id,
+            requested_tool="read_customer",
+            agent_scopes=("read_customer",),
+            parent_scopes=(),
+            expires_at=expires_at,
+        )
+        if _decide_and_log(
+            context=read_context,
+            path=log_path,
+            run_id=run_b_id,
+            agent_id="lab24-agent/run-b",
+            arguments={"customer_id": customer_id},
+        ):
+            records.append(tools.read_customer(customer_id))
+
+    if injection_seen:
+        egress_context = PolicyContext(
+            data_classification="restricted",
+            request_purpose="support-reply",
+            agent_owner="lab24-agent/run-b",
+            delegation_depth=0,
+            egress_enabled=True,
+            principal_id=principal_id,
+            requested_tool="http_post",
+            agent_scopes=("http_post",),
+            parent_scopes=(),
+            expires_at=expires_at,
+        )
+        if _decide_and_log(
+            context=egress_context,
+            path=log_path,
+            run_id=run_b_id,
+            agent_id="lab24-agent/run-b",
+            arguments={"url": _SAFE_EGRESS_URL, "record_count": len(records)},
+        ):
+            tools.http_post(_SAFE_EGRESS_URL, {"records": records})
+
+    return llm.summarize(safe_docs)

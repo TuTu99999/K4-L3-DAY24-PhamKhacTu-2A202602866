@@ -37,12 +37,67 @@ rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 
+_GENESIS_HASH = "0" * 64
+
+
+def _hash_entry(entry: dict) -> str:
+    encoded = json.dumps(entry, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    previous_hash = _GENESIS_HASH
+    if path.exists() and path.stat().st_size:
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if lines:
+            try:
+                previous_hash = json.loads(lines[-1])["hash"]
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise ValueError("cannot append to a malformed ledger") from exc
+
+    complete = dict(entry)
+    complete["prev_hash"] = previous_hash
+    complete.pop("hash", None)
+    complete["hash"] = _hash_entry(complete)
+
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(complete, ensure_ascii=False) + "\n")
+    return complete
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    path = Path(path)
+    if not path.exists():
+        return False
+
+    expected_previous = _GENESIS_HASH
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not lines:
+            return False
+        for line in lines:
+            entry = json.loads(line)
+            if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
+                return False
+            if entry.get("prev_hash") != expected_previous:
+                return False
+
+            stored_hash = entry.get("hash")
+            if not isinstance(stored_hash, str):
+                return False
+            payload = dict(entry)
+            payload.pop("hash", None)
+            if _hash_entry(payload) != stored_hash:
+                return False
+            expected_previous = stored_hash
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return True
